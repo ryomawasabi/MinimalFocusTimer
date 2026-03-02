@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Platform, TextInput, Modal, Pressable, SafeAreaView, ScrollView, AppState } from 'react-native';
+import { View, ScrollView, Text, TouchableOpacity, StyleSheet, Platform, TextInput, Modal, Pressable, Button, AppState } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Svg, { Circle, Defs, RadialGradient, Stop, Rect } from 'react-native-svg';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -8,7 +9,7 @@ import AdMobBanner from '../components/AdMobBanner';
 import FakeInterstitialAd from '../components/FakeInterstitialAd';
 import { useInterstitialAd } from '../hooks/useInterstitialAd';
 import { AdManager } from '../utils/AdManager';
-import { SoundManager } from '../utils/SoundManager';
+import * as Notifications from 'expo-notifications';
 
 const DAILY_BUDGET = 240;
 const MAX_SESSION = 90;
@@ -16,15 +17,19 @@ const STORAGE_KEY = 'focus_timer_data';
 const HISTORY_DATE_KEY = 'historyDate';
 const HISTORY_DATA_KEY = 'todayHistory';
 
+interface ActiveSession {
+  duration: number;
+  startTime: number;
+  pausedAt: number | null;
+  accumulatedRunningSeconds: number;
+  endTime: number; // 終了予定時刻 (timestamp ms)
+  notificationId: string | null;
+}
+
 interface TimerData {
   remainingMinutes: number;
   lastResetDate: string;
-  activeSession: {
-    duration: number;
-    startTime: number;
-    pausedAt: number | null;
-    accumulatedRunningSeconds: number;
-  } | null;
+  activeSession: ActiveSession | null;
 }
 
 interface HistoryEntry {
@@ -36,13 +41,44 @@ interface HistoryEntry {
 }
 
 export default function FocusTimer() {
+  // 通知許可を取る
+const requestPermission = async () => {
+  const { status } = await Notifications.getPermissionsAsync();
+  if (status !== "granted") {
+    await Notifications.requestPermissionsAsync();
+  }
+};
+
+// 5秒テスト通知
+const testNotification = async () => {
+  try {
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: "テスト通知",
+        body: "5秒後に出るはず",
+        sound: true,
+      },
+      trigger: {
+        seconds: 5,
+        repeats: false,
+      },
+    });
+  } catch (e) {
+    console.log("testNotification error:", e);
+  }
+};
+   
+
+  useEffect(() => {
+    const run = async () => {
+      await requestPermission();
+    };
+    run();
+  }, []);
+   
+    
   const [remainingMinutes, setRemainingMinutes] = useState(DAILY_BUDGET);
-  const [activeSession, setActiveSession] = useState<{
-    duration: number;
-    startTime: number;
-    pausedAt: number | null;
-    accumulatedRunningSeconds: number;
-  } | null>(null);
+  const [activeSession, setActiveSession] = useState<ActiveSession | null>(null);
   const [countdown, setCountdown] = useState(0);
   const [selectedDuration, setSelectedDuration] = useState(25);
   const [taskLabel, setTaskLabel] = useState('');
@@ -59,10 +95,91 @@ export default function FocusTimer() {
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const { showAd: showInterstitialAd, isVisible: interstitialVisible, handleClose: handleInterstitialClose } = useInterstitialAd();
 
+  // 通知権限の確認＆取得
+  const ensureNotificationPermissions = async () => {
+    const { status: existingStatus } = await Notifications.getPermissionsAsync();
+    let finalStatus = existingStatus;
+
+    if (existingStatus !== 'granted') {
+      const { status } = await Notifications.requestPermissionsAsync();
+      finalStatus = status;
+    }
+
+    return finalStatus === 'granted';
+  };
+
+  // ActiveSession から endTime ベースで残り秒数を算出
+  const getRemainingSecondsForSession = (session: ActiveSession): number => {
+    if (session.pausedAt !== null) {
+      // 一時停止中は、停止時点での残り時間を固定
+      return Math.max(0, Math.round((session.endTime - session.pausedAt) / 1000));
+    }
+    return Math.max(0, Math.round((session.endTime - Date.now()) / 1000));
+  };
+
+  // セッション終了通知を予約
+  const scheduleEndNotification = async (endTime: number, label: string): Promise<string | null> => {
+    const hasPermission = await ensureNotificationPermissions();
+    if (!hasPermission) {
+      console.log('Notifications: permission not granted');
+      return null;
+    }
+
+    const seconds = Math.max(1, Math.round((endTime - Date.now()) / 1000));
+
+    try {
+      const id = await Notifications.scheduleNotificationAsync({
+        content: {
+          title: 'Session complete',
+          body: label.trim()
+            ? `「${label.trim()}」が終了しました`
+            : 'Your focus session is complete.',
+          sound: true,
+        },
+        trigger: {
+          seconds,
+          channelId: 'timer-finish',
+        },
+      });
+
+      return id;
+    } catch (e) {
+      console.log('Notifications: schedule error', e);
+      return null;
+    }
+  };
+
+  // 通知キャンセル
+  const cancelEndNotification = async (notificationId: string | null | undefined) => {
+    if (!notificationId) return;
+    try {
+      await Notifications.cancelScheduledNotificationAsync(notificationId);
+    } catch (e) {
+      console.log('Notifications: cancel error', e);
+    }
+  };
+
   useEffect(() => {
     loadData();
     checkHistoryRollover();
-    SoundManager.load();
+
+    // 通知ハンドラ設定（フォアグラウンド時もアラート＆サウンドを有効化）
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: true,
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+      }),
+    });
+
+    // Android 用通知チャンネル
+    if (Platform.OS === 'android') {
+      Notifications.setNotificationChannelAsync('timer-finish', {
+        name: 'Timer Finish',
+        importance: Notifications.AndroidImportance.HIGH,
+        sound: 'default',
+      });
+    }
 
     const subscription = AppState.addEventListener('change', (nextAppState) => {
       if (nextAppState === 'active') {
@@ -72,7 +189,6 @@ export default function FocusTimer() {
 
     return () => {
       subscription.remove();
-      SoundManager.unload();
     };
   }, []);
 
@@ -205,19 +321,54 @@ export default function FocusTimer() {
         } else {
           setRemainingMinutes(data.remainingMinutes);
           if (data.activeSession) {
-            // Migrate old sessions to new format
-            if (data.activeSession.pausedAt === undefined) {
-              data.activeSession.pausedAt = null;
-              data.activeSession.accumulatedRunningSeconds = 0;
+            // 旧フォーマットからのマイグレーション
+            const legacy: any = data.activeSession;
+
+            if (legacy.pausedAt === undefined) {
+              legacy.pausedAt = null;
+            }
+            if (legacy.accumulatedRunningSeconds === undefined) {
+              legacy.accumulatedRunningSeconds = 0;
+            }
+            if (legacy.endTime === undefined) {
+              const totalRunningSeconds = calculateTotalRunningSeconds(legacy);
+              const sessionSeconds = legacy.duration * 60;
+              const remainingSecondsInitial = Math.max(0, sessionSeconds - totalRunningSeconds);
+              legacy.endTime = Date.now() + remainingSecondsInitial * 1000;
+            }
+            if (legacy.notificationId === undefined) {
+              legacy.notificationId = null;
             }
 
-            const totalRunningSeconds = calculateTotalRunningSeconds(data.activeSession);
-            const sessionSeconds = data.activeSession.duration * 60;
+            const session: ActiveSession = {
+              duration: legacy.duration,
+              startTime: legacy.startTime,
+              pausedAt: legacy.pausedAt,
+              accumulatedRunningSeconds: legacy.accumulatedRunningSeconds,
+              endTime: legacy.endTime,
+              notificationId: legacy.notificationId,
+            };
 
-            if (totalRunningSeconds >= sessionSeconds) {
-              await endSessionWithData(data.activeSession, 'completed');
+            const remainingSeconds = getRemainingSecondsForSession(session);
+
+            if (remainingSeconds <= 0) {
+              await endSessionWithData(session, 'completed');
             } else {
-              setActiveSession(data.activeSession);
+              let restoredSession = session;
+
+              if (session.pausedAt === null) {
+                // 実行中のセッションは、再起動後に通知を再スケジュール
+                const newEndTime = Date.now() + remainingSeconds * 1000;
+                const notificationId = await scheduleEndNotification(newEndTime, '');
+                restoredSession = {
+                  ...session,
+                  endTime: newEndTime,
+                  notificationId,
+                };
+              }
+
+              setActiveSession(restoredSession);
+              await saveData({ activeSession: restoredSession });
             }
           }
         }
@@ -291,12 +442,19 @@ export default function FocusTimer() {
   const startSession = async () => {
     if (!selectedDuration) return;
 
-    const session = {
+    const startTime = Date.now();
+    const endTime = startTime + selectedDuration * 60 * 1000;
+    const notificationId = await scheduleEndNotification(endTime, taskLabel);
+
+    const session: ActiveSession = {
       duration: selectedDuration,
-      startTime: Date.now(),
+      startTime,
       pausedAt: null,
       accumulatedRunningSeconds: 0,
+      endTime,
+      notificationId,
     };
+
     setActiveSession(session);
     await saveData({ activeSession: session });
   };
@@ -304,8 +462,10 @@ export default function FocusTimer() {
   const pauseSession = async () => {
     if (!activeSession || activeSession.pausedAt !== null) return;
 
+    await cancelEndNotification(activeSession.notificationId);
+
     const currentRunSeconds = Math.floor((Date.now() - activeSession.startTime) / 1000);
-    const updatedSession = {
+    const updatedSession: ActiveSession = {
       ...activeSession,
       pausedAt: Date.now(),
       accumulatedRunningSeconds: activeSession.accumulatedRunningSeconds + currentRunSeconds,
@@ -318,10 +478,22 @@ export default function FocusTimer() {
   const resumeSession = async () => {
     if (!activeSession || activeSession.pausedAt === null) return;
 
-    const updatedSession = {
+    const remainingSeconds = getRemainingSecondsForSession(activeSession);
+    if (remainingSeconds <= 0) {
+      await endSessionWithData(activeSession, 'completed');
+      return;
+    }
+
+    const startTime = Date.now();
+    const newEndTime = startTime + remainingSeconds * 1000;
+    const notificationId = await scheduleEndNotification(newEndTime, taskLabel);
+
+    const updatedSession: ActiveSession = {
       ...activeSession,
-      startTime: Date.now(),
+      startTime,
       pausedAt: null,
+      endTime: newEndTime,
+      notificationId,
     };
 
     setActiveSession(updatedSession);
@@ -329,29 +501,18 @@ export default function FocusTimer() {
   };
 
   const endSessionWithData = async (
-    session: {
-      duration: number;
-      startTime: number;
-      pausedAt: number | null;
-      accumulatedRunningSeconds: number;
-    },
+    session: ActiveSession,
     reason: 'ended' | 'completed' = 'ended'
   ) => {
-    const activeRunningSeconds = calculateTotalRunningSeconds(session);
     const plannedSessionMinutes = session.duration;
     const beforeRemaining = remainingMinutes;
     const afterRemaining = Math.max(0, beforeRemaining - plannedSessionMinutes);
 
     console.log('=== END SESSION DEBUG ===');
-    console.log('activeRunningSeconds:', activeRunningSeconds);
     console.log('plannedSessionMinutes (deducted):', plannedSessionMinutes);
     console.log('beforeRemaining:', beforeRemaining);
     console.log('afterRemaining:', afterRemaining);
     console.log('========================');
-
-    if (reason === 'completed') {
-      SoundManager.playFinish();
-    }
 
     await recordHistoryEntry(plannedSessionMinutes, reason);
 
@@ -371,23 +532,29 @@ export default function FocusTimer() {
 
   const endSession = async () => {
     if (!activeSession) return;
+
+    await cancelEndNotification(activeSession.notificationId);
     await endSessionWithData(activeSession, 'ended');
   };
 
   const startCountdown = () => {
     if (!activeSession) return;
 
-    const updateCountdown = () => {
-      if (!activeSession) return;
+    const session = activeSession;
 
-      const totalRunningSeconds = calculateTotalRunningSeconds(activeSession);
-      const sessionSeconds = activeSession.duration * 60;
-      const remaining = Math.max(0, sessionSeconds - totalRunningSeconds);
+    const updateCountdown = () => {
+      if (!session) return;
+
+      const remaining = getRemainingSecondsForSession(session);
 
       setCountdown(remaining);
 
       if (remaining === 0) {
-        endSessionWithData(activeSession, 'completed');
+        endSessionWithData(session, 'completed');
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+        }
       }
     };
 
@@ -489,13 +656,13 @@ export default function FocusTimer() {
               styles.testSoundButton,
               pressed && styles.testSoundButtonPressed,
             ]}
-            onPress={() => {
-              console.log('TestSound: pressed');
-              SoundManager.playFinish();
+            onPress={async () => {
+              const testEndTime = Date.now() + 5 * 1000;
+              await scheduleEndNotification(testEndTime, taskLabel || 'Test session');
             }}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           >
-            <Text style={styles.testSoundButtonText}>Test Sound</Text>
+            <Text style={styles.testSoundButtonText}>Test Notify</Text>
           </Pressable>
 
           {!activeSession && !isDepleted && (
