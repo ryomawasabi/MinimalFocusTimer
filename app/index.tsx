@@ -11,6 +11,7 @@ import { useInterstitialAd } from '../hooks/useInterstitialAd';
 import { AdManager } from '../utils/AdManager';
 import * as Notifications from 'expo-notifications';
 
+const DEBUG_MODE = false; // true にするとデバッグUIが表示される
 const DAILY_BUDGET = 240;
 const MAX_SESSION = 90;
 const STORAGE_KEY = 'focus_timer_data';
@@ -49,32 +50,32 @@ const requestPermission = async () => {
   }
 };
 
-// 5秒テスト通知
+// 5秒テスト通知（デバッグ付き）
 const testNotification = async () => {
-  try {
-    await Notifications.scheduleNotificationAsync({
+  try {console.log("pressed at", Date.now());
+    
+
+    // 以前の予約通知が残ってると「即時に来た」ように見えるので全部消す
+    await Notifications.cancelAllScheduledNotificationsAsync();
+
+    const id = await Notifications.scheduleNotificationAsync({
       content: {
         title: "テスト通知",
         body: "5秒後に出るはず",
         sound: true,
       },
-      trigger: {
-        seconds: 5,
-        repeats: false,
-      },
+      trigger: { type: "date", date: new Date(Date.now() + 5000) },
+      // もしまだ即時なら、上をコメントアウトして ↓ に切替
+      // trigger: new Date(Date.now() + 5000),
     });
+
+    const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+    console.log("scheduled id", id);
+    console.log("scheduled count", scheduled.length, scheduled);
   } catch (e) {
     console.log("testNotification error:", e);
   }
 };
-   
-
-  useEffect(() => {
-    const run = async () => {
-      await requestPermission();
-    };
-    run();
-  }, []);
    
     
   const [remainingMinutes, setRemainingMinutes] = useState(DAILY_BUDGET);
@@ -125,7 +126,11 @@ const testNotification = async () => {
       return null;
     }
 
-    const seconds = Math.max(1, Math.round((endTime - Date.now()) / 1000));
+    // 既存の予約を全キャンセル → 同セッションにつき常に1件
+    await Notifications.cancelAllScheduledNotificationsAsync();
+
+    // safeDate: 必ず未来（最低+1秒）にする → 即時発火を防止
+    const safeDate = new Date(Math.max(endTime, Date.now() + 1000));
 
     try {
       const id = await Notifications.scheduleNotificationAsync({
@@ -137,11 +142,12 @@ const testNotification = async () => {
           sound: true,
         },
         trigger: {
-          seconds,
-          channelId: 'timer-finish',
+          type: Notifications.SchedulableTriggerInputTypes.DATE,
+          date: safeDate,
         },
       });
 
+      console.log('Notifications: scheduled id=', id, 'at', safeDate.toISOString());
       return id;
     } catch (e) {
       console.log('Notifications: schedule error', e);
@@ -149,11 +155,10 @@ const testNotification = async () => {
     }
   };
 
-  // 通知キャンセル
-  const cancelEndNotification = async (notificationId: string | null | undefined) => {
-    if (!notificationId) return;
+  // 通知キャンセル（全予約を消す → 二重防止）
+  const cancelEndNotification = async (_notificationId?: string | null) => {
     try {
-      await Notifications.cancelScheduledNotificationAsync(notificationId);
+      await Notifications.cancelAllScheduledNotificationsAsync();
     } catch (e) {
       console.log('Notifications: cancel error', e);
     }
@@ -276,12 +281,14 @@ const testNotification = async () => {
     setTodayHistory([]);
     await saveHistory([]);
     setShowClearHistoryModal(false);
+    setShowHistoryModal(false); // 両方閉じる
   };
 
   const startEditingEntry = (entry: HistoryEntry) => {
+    setShowHistoryModal(false); // 先に History を閉じてからサブモーダルを開く
     setEditingEntry(entry);
     setEditedLabel(entry.label);
-    setShowEditLabelModal(true);
+    setTimeout(() => setShowEditLabelModal(true), 300);
   };
 
   const saveEditedLabel = async () => {
@@ -651,19 +658,18 @@ const testNotification = async () => {
             <Text style={styles.resetButtonText}>Reset</Text>
           </Pressable>
 
-          <Pressable
-            style={({ pressed }) => [
-              styles.testSoundButton,
-              pressed && styles.testSoundButtonPressed,
-            ]}
-            onPress={async () => {
-              const testEndTime = Date.now() + 5 * 1000;
-              await scheduleEndNotification(testEndTime, taskLabel || 'Test session');
-            }}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Text style={styles.testSoundButtonText}>Test Notify</Text>
-          </Pressable>
+          {DEBUG_MODE && (
+            <Pressable
+              style={({ pressed }) => [
+                styles.testSoundButton,
+                pressed && styles.testSoundButtonPressed,
+              ]}
+              onPress={testNotification}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={styles.testSoundButtonText}>Test Notify</Text>
+            </Pressable>
+          )}
 
           {!activeSession && !isDepleted && (
             <View style={styles.taskInputContainer} pointerEvents="auto">
@@ -935,7 +941,10 @@ const testNotification = async () => {
               {todayHistory.length > 0 && (
                 <TouchableOpacity
                   style={styles.historyClearButton}
-                  onPress={() => setShowClearHistoryModal(true)}
+                  onPress={() => {
+                    setShowHistoryModal(false);
+                    setTimeout(() => setShowClearHistoryModal(true), 300);
+                  }}
                   activeOpacity={0.7}
                 >
                   <Text style={styles.historyClearButtonText}>Clear History</Text>
@@ -961,7 +970,10 @@ const testNotification = async () => {
               <View style={styles.modalButtons}>
                 <TouchableOpacity
                   style={styles.modalButtonCancel}
-                  onPress={() => setShowClearHistoryModal(false)}
+                  onPress={() => {
+                    setShowClearHistoryModal(false);
+                    setTimeout(() => setShowHistoryModal(true), 300);
+                  }}
                   activeOpacity={0.7}
                 >
                   <Text style={styles.modalButtonCancelText}>Cancel</Text>
