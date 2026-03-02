@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "MinimalFocusTimer",
-    "slug": "minimal-focus-timer",
+    "slug": "bolt-expo-nativewind",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -23,7 +23,13 @@
     "plugins": [
       "expo-router",
       "expo-font",
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "react-native-google-mobile-ads",
+        {
+          "iosAppId": "ca-app-pub-1819532998036158~7759356195"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

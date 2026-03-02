@@ -6,8 +6,8 @@ import Svg, { Circle, Defs, RadialGradient, Stop, Rect } from 'react-native-svg'
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { useAnimatedStyle, useSharedValue, withRepeat, withTiming, Easing } from 'react-native-reanimated';
 import AdMobBanner from '../components/AdMobBanner';
-import FakeInterstitialAd from '../components/FakeInterstitialAd';
 import { useInterstitialAd } from '../hooks/useInterstitialAd';
+import { useAppOpenAd } from '../hooks/useAppOpenAd';
 import { AdManager } from '../utils/AdManager';
 import * as Notifications from 'expo-notifications';
 
@@ -94,7 +94,8 @@ const testNotification = async () => {
   const [todayHistory, setTodayHistory] = useState<HistoryEntry[]>([]);
   const [debugToast, setDebugToast] = useState<string | null>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
-  const { showAd: showInterstitialAd, isVisible: interstitialVisible, handleClose: handleInterstitialClose } = useInterstitialAd();
+  const { showAd: showInterstitialAd } = useInterstitialAd();
+  useAppOpenAd();
 
   // 通知権限の確認＆取得
   const ensureNotificationPermissions = async () => {
@@ -1034,14 +1035,7 @@ const testNotification = async () => {
           </View>
         </Modal>
 
-        {Platform.OS === 'web' && (
-          <FakeInterstitialAd
-            visible={interstitialVisible}
-            onClose={handleInterstitialClose}
-          />
-        )}
-
-        {AdManager.shouldShowBanner() && (
+        {Platform.OS !== 'web' && (
           <View style={styles.bannerContainer}>
             <AdMobBanner />
           </View>
