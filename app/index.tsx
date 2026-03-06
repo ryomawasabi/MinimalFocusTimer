@@ -12,11 +12,12 @@ import { AdManager } from '../utils/AdManager';
 import * as Notifications from 'expo-notifications';
 
 const DEBUG_MODE = false; // true にするとデバッグUIが表示される
-const DAILY_BUDGET = 240;
 const MAX_SESSION = 90;
 const STORAGE_KEY = 'focus_timer_data';
 const HISTORY_DATE_KEY = 'historyDate';
 const HISTORY_DATA_KEY = 'todayHistory';
+const WEEKLY_HISTORY_KEY = 'weekly_history';
+const APP_SETTINGS_KEY = 'app_settings';
 
 interface ActiveSession {
   duration: number;
@@ -41,6 +42,18 @@ interface HistoryEntry {
   reason: 'ended' | 'completed';
 }
 
+interface DailyStats {
+  date: string;
+  totalMinutes: number;
+  sessions: number;
+  completed: number;
+}
+
+interface AppSettings {
+  dailyBudget: number;
+  notificationSound: boolean;
+}
+
 export default function FocusTimer() {
   // 通知許可を取る
 const requestPermission = async () => {
@@ -53,7 +66,7 @@ const requestPermission = async () => {
 // 5秒テスト通知（デバッグ付き）
 const testNotification = async () => {
   try {console.log("pressed at", Date.now());
-    
+
 
     // 以前の予約通知が残ってると「即時に来た」ように見えるので全部消す
     await Notifications.cancelAllScheduledNotificationsAsync();
@@ -76,9 +89,10 @@ const testNotification = async () => {
     console.log("testNotification error:", e);
   }
 };
-   
-    
-  const [remainingMinutes, setRemainingMinutes] = useState(DAILY_BUDGET);
+
+
+  const [dailyBudget, setDailyBudget] = useState(240);
+  const [remainingMinutes, setRemainingMinutes] = useState(240);
   const [activeSession, setActiveSession] = useState<ActiveSession | null>(null);
   const [countdown, setCountdown] = useState(0);
   const [selectedDuration, setSelectedDuration] = useState(25);
@@ -89,9 +103,15 @@ const testNotification = async () => {
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [showClearHistoryModal, setShowClearHistoryModal] = useState(false);
   const [showEditLabelModal, setShowEditLabelModal] = useState(false);
+  const [showStatsModal, setShowStatsModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [editingEntry, setEditingEntry] = useState<HistoryEntry | null>(null);
   const [editedLabel, setEditedLabel] = useState('');
   const [todayHistory, setTodayHistory] = useState<HistoryEntry[]>([]);
+  const [weeklyHistory, setWeeklyHistory] = useState<DailyStats[]>([]);
+  const [currentStreak, setCurrentStreak] = useState(0);
+  const [usePresets, setUsePresets] = useState(true);
+  const [settingsNotificationSound, setSettingsNotificationSound] = useState(true);
   const [debugToast, setDebugToast] = useState<string | null>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const { showAd: showInterstitialAd } = useInterstitialAd();
@@ -140,7 +160,7 @@ const testNotification = async () => {
           body: label.trim()
             ? `「${label.trim()}」が終了しました`
             : 'Your focus session is complete.',
-          sound: true,
+          sound: settingsNotificationSound,
         },
         trigger: {
           type: Notifications.SchedulableTriggerInputTypes.DATE,
@@ -165,8 +185,127 @@ const testNotification = async () => {
     }
   };
 
+  const getTodayDate = () => {
+    return new Date().toISOString().split('T')[0];
+  };
+
+  const calculateTotalRunningSeconds = (session: {
+    startTime: number;
+    pausedAt: number | null;
+    accumulatedRunningSeconds: number;
+  }): number => {
+    if (session.pausedAt !== null) {
+      // Session is paused, only count accumulated
+      return session.accumulatedRunningSeconds;
+    } else {
+      // Session is running, add current run time
+      const currentRunSeconds = Math.floor((Date.now() - session.startTime) / 1000);
+      return session.accumulatedRunningSeconds + currentRunSeconds;
+    }
+  };
+
+  // Load settings from AsyncStorage
+  const loadSettings = async () => {
+    try {
+      const stored = await AsyncStorage.getItem(APP_SETTINGS_KEY);
+      if (stored) {
+        const settings: AppSettings = JSON.parse(stored);
+        setDailyBudget(settings.dailyBudget);
+        setSettingsNotificationSound(settings.notificationSound);
+      }
+    } catch (error) {
+      console.error('Failed to load settings:', error);
+    }
+  };
+
+  // Save settings to AsyncStorage
+  const saveSettings = async (settings: AppSettings) => {
+    try {
+      await AsyncStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(settings));
+    } catch (error) {
+      console.error('Failed to save settings:', error);
+    }
+  };
+
+  // Load weekly history
+  const loadWeeklyHistory = async () => {
+    try {
+      const stored = await AsyncStorage.getItem(WEEKLY_HISTORY_KEY);
+      if (stored) {
+        const history: DailyStats[] = JSON.parse(stored);
+        setWeeklyHistory(history);
+        calculateStreak(history);
+      }
+    } catch (error) {
+      console.error('Failed to load weekly history:', error);
+    }
+  };
+
+  // Calculate streak from weekly history
+  const calculateStreak = (history: DailyStats[]) => {
+    let streak = 0;
+    const today = getTodayDate();
+    let currentDate = new Date(today);
+
+    while (streak < 365) {
+      const dateStr = currentDate.toISOString().split('T')[0];
+      const dayStats = history.find(h => h.date === dateStr);
+
+      if (dayStats && dayStats.sessions > 0) {
+        streak++;
+        currentDate.setDate(currentDate.getDate() - 1);
+      } else {
+        break;
+      }
+    }
+
+    setCurrentStreak(streak);
+  };
+
+  // Save weekly history
+  const saveWeeklyHistory = async (history: DailyStats[]) => {
+    try {
+      await AsyncStorage.setItem(WEEKLY_HISTORY_KEY, JSON.stringify(history));
+    } catch (error) {
+      console.error('Failed to save weekly history:', error);
+    }
+  };
+
+  // Update weekly stats when session ends
+  const updateWeeklyStats = async (minutes: number, completed: boolean) => {
+    const today = getTodayDate();
+    const newHistory = [...weeklyHistory];
+    const existingIndex = newHistory.findIndex(h => h.date === today);
+
+    if (existingIndex >= 0) {
+      newHistory[existingIndex].totalMinutes += minutes;
+      newHistory[existingIndex].sessions += 1;
+      if (completed) {
+        newHistory[existingIndex].completed += 1;
+      }
+    } else {
+      newHistory.push({
+        date: today,
+        totalMinutes: minutes,
+        sessions: 1,
+        completed: completed ? 1 : 0,
+      });
+    }
+
+    // Keep only last 90 days
+    const ninetyDaysAgo = new Date();
+    ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+    const filteredHistory = newHistory.filter(h => new Date(h.date) >= ninetyDaysAgo);
+
+    setWeeklyHistory(filteredHistory);
+    await saveWeeklyHistory(filteredHistory);
+    calculateStreak(filteredHistory);
+  };
+
   useEffect(() => {
     loadData();
+    loadSettings();
+    loadWeeklyHistory();
     checkHistoryRollover();
 
     // 通知ハンドラ設定（フォアグラウンド時もアラート＆サウンドを有効化）
@@ -207,25 +346,6 @@ const testNotification = async () => {
 
     return () => stopCountdown();
   }, [activeSession]);
-
-  const getTodayDate = () => {
-    return new Date().toISOString().split('T')[0];
-  };
-
-  const calculateTotalRunningSeconds = (session: {
-    startTime: number;
-    pausedAt: number | null;
-    accumulatedRunningSeconds: number;
-  }): number => {
-    if (session.pausedAt !== null) {
-      // Session is paused, only count accumulated
-      return session.accumulatedRunningSeconds;
-    } else {
-      // Session is running, add current run time
-      const currentRunSeconds = Math.floor((Date.now() - session.startTime) / 1000);
-      return session.accumulatedRunningSeconds + currentRunSeconds;
-    }
-  };
 
   const checkHistoryRollover = async () => {
     try {
@@ -276,6 +396,9 @@ const testNotification = async () => {
     const updatedHistory = [entry, ...todayHistory];
     setTodayHistory(updatedHistory);
     await saveHistory(updatedHistory);
+
+    // Update weekly stats
+    await updateWeeklyStats(minutes, reason === 'completed');
   };
 
   const clearHistory = async () => {
@@ -393,7 +516,7 @@ const testNotification = async () => {
     try {
       const stored = await AsyncStorage.getItem(STORAGE_KEY);
       const current: TimerData = stored ? JSON.parse(stored) : {
-        remainingMinutes: DAILY_BUDGET,
+        remainingMinutes: dailyBudget,
         lastResetDate: getTodayDate(),
         activeSession: null,
       };
@@ -407,12 +530,12 @@ const testNotification = async () => {
 
   const resetDaily = async () => {
     const data: TimerData = {
-      remainingMinutes: DAILY_BUDGET,
+      remainingMinutes: dailyBudget,
       lastResetDate: getTodayDate(),
       activeSession: null,
     };
     await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-    setRemainingMinutes(DAILY_BUDGET);
+    setRemainingMinutes(dailyBudget);
     setActiveSession(null);
   };
 
@@ -585,14 +708,70 @@ const testNotification = async () => {
 
   const isDepleted = remainingMinutes === 0 && !activeSession;
 
+  const selectPreset = (minutes: number) => {
+    const maxAllowed = Math.min(MAX_SESSION, remainingMinutes);
+    if (minutes <= maxAllowed) {
+      setSelectedDuration(minutes);
+      setUsePresets(true);
+    }
+  };
+
   const adjustDuration = (change: number) => {
     const newDuration = selectedDuration + change;
     const maxAllowed = Math.min(MAX_SESSION, remainingMinutes);
     const clamped = Math.max(5, Math.min(newDuration, maxAllowed));
     setSelectedDuration(clamped);
+    setUsePresets(false);
   };
 
-  const progressPercentage = (remainingMinutes / DAILY_BUDGET) * 100;
+  const handleSettingsSave = async () => {
+    const settings: AppSettings = {
+      dailyBudget: dailyBudget,
+      notificationSound: settingsNotificationSound,
+    };
+    await saveSettings(settings);
+
+    // Reset daily budget
+    const newRemaining = Math.min(remainingMinutes + (dailyBudget - remainingMinutes), dailyBudget);
+    setRemainingMinutes(newRemaining);
+    await saveData({ remainingMinutes: newRemaining });
+
+    setShowSettingsModal(false);
+  };
+
+  // Get last 7 days of stats for weekly breakdown
+  const getLastSevenDays = (): DailyStats[] => {
+    const result: DailyStats[] = [];
+    const today = new Date();
+
+    for (let i = 6; i >= 0; i--) {
+      const date = new Date(today);
+      date.setDate(date.getDate() - i);
+      const dateStr = date.toISOString().split('T')[0];
+      const stats = weeklyHistory.find(h => h.date === dateStr);
+
+      result.push(stats || { date: dateStr, totalMinutes: 0, sessions: 0, completed: 0 });
+    }
+
+    return result;
+  };
+
+  const getWeeklyStats = () => {
+    const lastSevenDays = getLastSevenDays();
+    const totalMinutes = lastSevenDays.reduce((sum, day) => sum + day.totalMinutes, 0);
+    const totalSessions = lastSevenDays.reduce((sum, day) => sum + day.sessions, 0);
+    const totalCompleted = lastSevenDays.reduce((sum, day) => sum + day.completed, 0);
+
+    return {
+      totalMinutes,
+      totalSessions,
+      totalCompleted,
+      completionRate: totalSessions > 0 ? Math.round((totalCompleted / totalSessions) * 100) : 0,
+      lastSevenDays,
+    };
+  };
+
+  const progressPercentage = (remainingMinutes / dailyBudget) * 100;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -636,16 +815,29 @@ const testNotification = async () => {
               <Text style={styles.endButtonText}>End</Text>
             </Pressable>
           ) : (
-            <Pressable
-              style={({ pressed }) => [
-                styles.historyButton,
-                pressed && styles.historyButtonPressed,
-              ]}
-              onPress={() => setShowHistoryModal(true)}
-              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-            >
-              <Text style={styles.historyButtonText}>History</Text>
-            </Pressable>
+            <View style={styles.topButtonGroup}>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.historyButton,
+                  pressed && styles.historyButtonPressed,
+                ]}
+                onPress={() => setShowHistoryModal(true)}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              >
+                <Text style={styles.historyButtonText}>History</Text>
+              </Pressable>
+
+              <Pressable
+                style={({ pressed }) => [
+                  styles.statsButton,
+                  pressed && styles.statsButtonPressed,
+                ]}
+                onPress={() => setShowStatsModal(true)}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              >
+                <Text style={styles.statsButtonText}>Stats</Text>
+              </Pressable>
+            </View>
           )}
 
           <Pressable
@@ -657,6 +849,17 @@ const testNotification = async () => {
             hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
           >
             <Text style={styles.resetButtonText}>Reset</Text>
+          </Pressable>
+
+          <Pressable
+            style={({ pressed }) => [
+              styles.settingsButton,
+              pressed && styles.settingsButtonPressed,
+            ]}
+            onPress={() => setShowSettingsModal(true)}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          >
+            <Text style={styles.settingsButtonText}>⚙</Text>
           </Pressable>
 
           {DEBUG_MODE && (
@@ -727,33 +930,84 @@ const testNotification = async () => {
           </View>
 
           {!activeSession && !isDepleted && (
-            <View style={styles.durationControls} pointerEvents="auto">
-              <TouchableOpacity
-                style={styles.adjustButton}
-                onPress={() => adjustDuration(-5)}
-                activeOpacity={0.6}
-              >
-                <Text style={styles.adjustButtonText}>−</Text>
-              </TouchableOpacity>
+            <>
+              {usePresets ? (
+                <View style={styles.presetButtonsContainer} pointerEvents="auto">
+                  {[25, 50, 90].map((duration) => {
+                    const isAvailable = duration <= Math.min(MAX_SESSION, remainingMinutes);
+                    const isSelected = selectedDuration === duration && usePresets;
+                    return (
+                      <TouchableOpacity
+                        key={duration}
+                        style={[
+                          styles.presetButton,
+                          !isAvailable && styles.presetButtonDisabled,
+                          isSelected && styles.presetButtonSelected,
+                        ]}
+                        onPress={() => isAvailable && selectPreset(duration)}
+                        activeOpacity={0.7}
+                        disabled={!isAvailable}
+                      >
+                        <Text
+                          style={[
+                            styles.presetButtonText,
+                            !isAvailable && styles.presetButtonDisabledText,
+                            isSelected && styles.presetButtonSelectedText,
+                          ]}
+                        >
+                          {duration}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                  <TouchableOpacity
+                    style={[
+                      styles.presetButton,
+                      !usePresets && styles.presetButtonSelected,
+                    ]}
+                    onPress={() => setUsePresets(false)}
+                    activeOpacity={0.7}
+                  >
+                    <Text
+                      style={[
+                        styles.presetButtonText,
+                        !usePresets && styles.presetButtonSelectedText,
+                      ]}
+                    >
+                      Custom
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.durationControls} pointerEvents="auto">
+                  <TouchableOpacity
+                    style={styles.adjustButton}
+                    onPress={() => adjustDuration(-5)}
+                    activeOpacity={0.6}
+                  >
+                    <Text style={styles.adjustButtonText}>−</Text>
+                  </TouchableOpacity>
 
-              <View style={styles.durationDisplay}>
-                <Text style={styles.durationNumber}>{selectedDuration}</Text>
-                <Text style={styles.durationLabel}>minutes</Text>
-              </View>
+                  <View style={styles.durationDisplay}>
+                    <Text style={styles.durationNumber}>{selectedDuration}</Text>
+                    <Text style={styles.durationLabel}>minutes</Text>
+                  </View>
 
-              <TouchableOpacity
-                style={styles.adjustButton}
-                onPress={() => adjustDuration(5)}
-                activeOpacity={0.6}
-              >
-                <Text style={styles.adjustButtonText}>+</Text>
-              </TouchableOpacity>
-            </View>
+                  <TouchableOpacity
+                    style={styles.adjustButton}
+                    onPress={() => adjustDuration(5)}
+                    activeOpacity={0.6}
+                  >
+                    <Text style={styles.adjustButtonText}>+</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </>
           )}
 
           <View style={styles.budgetContainer} pointerEvents="none">
             <Text style={styles.budgetText}>
-              {remainingMinutes} of {DAILY_BUDGET} min
+              {remainingMinutes} of {dailyBudget} min
             </Text>
           </View>
 
@@ -773,7 +1027,7 @@ const testNotification = async () => {
           <View style={styles.modalOverlay}>
             <View style={styles.modalContainer}>
               <Text style={styles.modalTitle}>Reset for today?</Text>
-              <Text style={styles.modalBody}>This sets remaining minutes back to 240.</Text>
+              <Text style={styles.modalBody}>This sets remaining minutes back to {dailyBudget}.</Text>
 
               <View style={styles.modalButtons}>
                 <TouchableOpacity
@@ -1035,6 +1289,158 @@ const testNotification = async () => {
           </View>
         </Modal>
 
+        <Modal
+          visible={showStatsModal}
+          transparent={true}
+          animationType="slide"
+          onRequestClose={() => setShowStatsModal(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContainer, styles.statsModalContainer]}>
+              <View style={styles.statsHeader}>
+                <Text style={styles.modalTitle}>Weekly Stats</Text>
+                <TouchableOpacity
+                  onPress={() => setShowStatsModal(false)}
+                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                >
+                  <Text style={styles.historyCloseText}>Close</Text>
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={styles.statsContent} showsVerticalScrollIndicator={false}>
+                <View style={styles.streakContainer}>
+                  <Text style={styles.streakLabel}>Current Streak</Text>
+                  <Text style={styles.streakNumber}>{currentStreak}</Text>
+                  <Text style={styles.streakDays}>days</Text>
+                </View>
+
+                {(() => {
+                  const weeklyStats = getWeeklyStats();
+                  return (
+                    <>
+                      <View style={styles.statsGrid}>
+                        <View style={styles.statCard}>
+                          <Text style={styles.statValue}>{weeklyStats.totalMinutes}</Text>
+                          <Text style={styles.statLabel}>Focus Min</Text>
+                        </View>
+                        <View style={styles.statCard}>
+                          <Text style={styles.statValue}>{weeklyStats.totalSessions}</Text>
+                          <Text style={styles.statLabel}>Sessions</Text>
+                        </View>
+                        <View style={styles.statCard}>
+                          <Text style={styles.statValue}>{weeklyStats.completionRate}%</Text>
+                          <Text style={styles.statLabel}>Complete</Text>
+                        </View>
+                      </View>
+
+                      <View style={styles.dailyBreakdownContainer}>
+                        <Text style={styles.breakdownTitle}>Daily Breakdown</Text>
+                        <View style={styles.dailyChartsContainer}>
+                          {weeklyStats.lastSevenDays.map((day, idx) => {
+                            const dayName = new Date(day.date).toLocaleDateString('en-US', { weekday: 'short' });
+                            const maxHeight = 100;
+                            const chartHeight = day.totalMinutes > 0 ? (day.totalMinutes / 240) * maxHeight : 5;
+                            return (
+                              <View key={idx} style={styles.dailyChartItem}>
+                                <View style={styles.dailyBar}>
+                                  <View
+                                    style={[
+                                      styles.dailyBarFill,
+                                      { height: chartHeight },
+                                    ]}
+                                  />
+                                </View>
+                                <Text style={styles.dailyLabel}>{dayName}</Text>
+                                <Text style={styles.dailyValue}>{day.totalMinutes}m</Text>
+                              </View>
+                            );
+                          })}
+                        </View>
+                      </View>
+                    </>
+                  );
+                })()}
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
+
+        <Modal
+          visible={showSettingsModal}
+          transparent={true}
+          animationType="slide"
+          onRequestClose={() => setShowSettingsModal(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContainer, styles.settingsModalContainer]}>
+              <View style={styles.settingsHeader}>
+                <Text style={styles.modalTitle}>Settings</Text>
+                <TouchableOpacity
+                  onPress={() => setShowSettingsModal(false)}
+                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                >
+                  <Text style={styles.historyCloseText}>Close</Text>
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={styles.settingsContent} showsVerticalScrollIndicator={false}>
+                <View style={styles.settingSection}>
+                  <Text style={styles.settingLabel}>Daily Budget (minutes)</Text>
+                  <View style={styles.budgetAdjustContainer}>
+                    <TouchableOpacity
+                      style={styles.settingAdjustButton}
+                      onPress={() => setDailyBudget(Math.max(60, dailyBudget - 30))}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.settingAdjustButtonText}>−</Text>
+                    </TouchableOpacity>
+                    <View style={styles.budgetDisplayContainer}>
+                      <Text style={styles.budgetDisplayValue}>{dailyBudget}</Text>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.settingAdjustButton}
+                      onPress={() => setDailyBudget(Math.min(480, dailyBudget + 30))}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.settingAdjustButtonText}>+</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <Text style={styles.settingInfo}>Range: 60 - 480 minutes</Text>
+                </View>
+
+                <View style={styles.settingSection}>
+                  <View style={styles.notificationToggleContainer}>
+                    <Text style={styles.settingLabel}>Notification Sound</Text>
+                    <TouchableOpacity
+                      style={[
+                        styles.toggleSwitch,
+                        settingsNotificationSound && styles.toggleSwitchOn,
+                      ]}
+                      onPress={() => setSettingsNotificationSound(!settingsNotificationSound)}
+                      activeOpacity={0.7}
+                    >
+                      <View
+                        style={[
+                          styles.toggleSwitchInner,
+                          settingsNotificationSound && styles.toggleSwitchInnerOn,
+                        ]}
+                      />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                <TouchableOpacity
+                  style={styles.settingsSaveButton}
+                  onPress={handleSettingsSave}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.settingsSaveButtonText}>Save Settings</Text>
+                </TouchableOpacity>
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
+
         {Platform.OS !== 'web' && (
           <View style={styles.bannerContainer}>
             <AdMobBanner />
@@ -1204,6 +1610,13 @@ const styles = StyleSheet.create({
   interactiveLayer: {
     flex: 1,
   },
+  topButtonGroup: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 10 : 20,
+    left: 20,
+    flexDirection: 'row',
+    gap: 12,
+  },
   endButton: {
     position: 'absolute',
     top: Platform.OS === 'ios' ? 10 : 20,
@@ -1227,9 +1640,6 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   historyButton: {
-    position: 'absolute',
-    top: Platform.OS === 'ios' ? 10 : 20,
-    left: 20,
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderRadius: 8,
@@ -1248,10 +1658,29 @@ const styles = StyleSheet.create({
     opacity: 0.5,
     fontWeight: '500',
   },
+  statsButton: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    minWidth: 44,
+    minHeight: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 100,
+  },
+  statsButtonPressed: {
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  statsButtonText: {
+    fontSize: 14,
+    color: '#68D7FF',
+    opacity: 0.5,
+    fontWeight: '500',
+  },
   resetButton: {
     position: 'absolute',
     top: Platform.OS === 'ios' ? 10 : 20,
-    right: 20,
+    right: 60,
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderRadius: 8,
@@ -1266,6 +1695,28 @@ const styles = StyleSheet.create({
   },
   resetButtonText: {
     fontSize: 14,
+    color: '#EAF2FF',
+    opacity: 0.5,
+    fontWeight: '500',
+  },
+  settingsButton: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 10 : 20,
+    right: 20,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    minWidth: 44,
+    minHeight: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 100,
+  },
+  settingsButtonPressed: {
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  settingsButtonText: {
+    fontSize: 18,
     color: '#EAF2FF',
     opacity: 0.5,
     fontWeight: '500',
@@ -1353,6 +1804,43 @@ const styles = StyleSheet.create({
     color: '#EAF2FF',
     opacity: 0.5,
     fontWeight: '400',
+  },
+  presetButtonsContainer: {
+    position: 'absolute',
+    bottom: 200,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingHorizontal: 20,
+  },
+  presetButton: {
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    borderRadius: 20,
+    backgroundColor: '#1A2840',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  presetButtonSelected: {
+    backgroundColor: '#68D7FF',
+  },
+  presetButtonDisabled: {
+    opacity: 0.3,
+  },
+  presetButtonText: {
+    fontSize: 14,
+    color: '#EAF2FF',
+    fontWeight: '500',
+  },
+  presetButtonSelectedText: {
+    color: '#000000',
+    fontWeight: '600',
+  },
+  presetButtonDisabledText: {
+    color: '#EAF2FF',
   },
   durationControls: {
     position: 'absolute',
@@ -1805,6 +2293,211 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     marginBottom: 24,
     fontWeight: '400',
+  },
+  statsModalContainer: {
+    maxHeight: '85%',
+    paddingBottom: 24,
+  },
+  statsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  statsContent: {
+    maxHeight: 500,
+  },
+  streakContainer: {
+    backgroundColor: 'rgba(104, 215, 255, 0.1)',
+    paddingVertical: 24,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  streakLabel: {
+    fontSize: 13,
+    color: '#EAF2FF',
+    opacity: 0.6,
+    fontWeight: '400',
+    marginBottom: 8,
+  },
+  streakNumber: {
+    fontSize: 48,
+    color: '#68D7FF',
+    fontWeight: '300',
+  },
+  streakDays: {
+    fontSize: 13,
+    color: '#EAF2FF',
+    opacity: 0.5,
+    fontWeight: '400',
+    marginTop: 4,
+  },
+  statsGrid: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 24,
+  },
+  statCard: {
+    flex: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    paddingVertical: 16,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  statValue: {
+    fontSize: 24,
+    color: '#68D7FF',
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  statLabel: {
+    fontSize: 12,
+    color: '#EAF2FF',
+    opacity: 0.6,
+    fontWeight: '400',
+  },
+  dailyBreakdownContainer: {
+    marginTop: 24,
+  },
+  breakdownTitle: {
+    fontSize: 14,
+    color: '#EAF2FF',
+    fontWeight: '500',
+    marginBottom: 16,
+  },
+  dailyChartsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  dailyChartItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  dailyBar: {
+    width: 32,
+    height: 100,
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderRadius: 4,
+    justifyContent: 'flex-end',
+    overflow: 'hidden',
+    marginBottom: 8,
+  },
+  dailyBarFill: {
+    width: '100%',
+    backgroundColor: '#68D7FF',
+  },
+  dailyLabel: {
+    fontSize: 11,
+    color: '#EAF2FF',
+    opacity: 0.6,
+    fontWeight: '400',
+    marginBottom: 4,
+  },
+  dailyValue: {
+    fontSize: 11,
+    color: '#68D7FF',
+    fontWeight: '500',
+  },
+  settingsModalContainer: {
+    maxHeight: '75%',
+    paddingBottom: 24,
+  },
+  settingsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  settingsContent: {
+    maxHeight: 400,
+  },
+  settingSection: {
+    marginBottom: 28,
+  },
+  settingLabel: {
+    fontSize: 14,
+    color: '#EAF2FF',
+    fontWeight: '500',
+    marginBottom: 12,
+  },
+  budgetAdjustContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 16,
+    marginBottom: 12,
+  },
+  settingAdjustButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#1A2840',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  settingAdjustButtonText: {
+    fontSize: 24,
+    color: '#EAF2FF',
+    fontWeight: '300',
+  },
+  budgetDisplayContainer: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    backgroundColor: 'rgba(104, 215, 255, 0.1)',
+    borderRadius: 8,
+  },
+  budgetDisplayValue: {
+    fontSize: 20,
+    color: '#68D7FF',
+    fontWeight: '600',
+  },
+  settingInfo: {
+    fontSize: 12,
+    color: '#EAF2FF',
+    opacity: 0.4,
+    fontWeight: '400',
+  },
+  notificationToggleContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  toggleSwitch: {
+    width: 54,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#0A1220',
+    justifyContent: 'flex-start',
+    padding: 2,
+  },
+  toggleSwitchOn: {
+    backgroundColor: '#68D7FF',
+    justifyContent: 'flex-end',
+  },
+  toggleSwitchInner: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#EAF2FF',
+  },
+  toggleSwitchInnerOn: {
+    backgroundColor: '#0A1628',
+  },
+  settingsSaveButton: {
+    marginTop: 32,
+    paddingVertical: 14,
+    backgroundColor: '#68D7FF',
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  settingsSaveButtonText: {
+    fontSize: 16,
+    color: '#000000',
+    fontWeight: '600',
   },
   bannerContainer: {
     position: 'absolute',
