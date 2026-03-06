@@ -1399,13 +1399,13 @@ const testNotification = async () => {
                     </View>
                     <TouchableOpacity
                       style={styles.settingAdjustButton}
-                      onPress={() => setDailyBudget(Math.min(480, dailyBudget + 30))}
+                      onPress={() => setDailyBudget(Math.min(240, dailyBudget + 30))}
                       activeOpacity={0.7}
                     >
                       <Text style={styles.settingAdjustButtonText}>+</Text>
                     </TouchableOpacity>
                   </View>
-                  <Text style={styles.settingInfo}>Range: 60 - 480 minutes</Text>
+                  <Text style={styles.settingInfo}>Range: 60 - 240 minutes</Text>
                 </View>
 
                 <View style={styles.settingSection}>
