@@ -561,13 +561,21 @@ const testNotification = async () => {
       return;
     }
     AdManager.recordEndInterstitialShown();
-    await showInterstitialAd();
+    try {
+      await Promise.race([
+        showInterstitialAd(),
+        new Promise(resolve => setTimeout(resolve, 15000)),
+      ]);
+    } catch (e) {
+      console.log('Interstitial ad error:', e);
+    }
   };
 
   const handleQuitSession = async () => {
     setShowEndConfirmModal(false);
-    await showEndInterstitialIfNeeded();
     await endSession();
+    // Show ad after session ends (non-blocking to prevent freeze)
+    showEndInterstitialIfNeeded();
   };
 
   const startSession = async () => {
